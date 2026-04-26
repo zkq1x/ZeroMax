@@ -1,0 +1,4 @@
+module zeromax_ffiFFI {
+    header "include/zeromax_ffiFFI.h"
+    export *
+}

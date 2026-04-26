@@ -1,0 +1,183 @@
+namespace zeromax_ffi {};
+
+[Error]
+enum FfiError {
+    "Auth",
+    "NotConnected",
+    "Timeout",
+    "InvalidPhone",
+    "Server",
+    "Network",
+    "Internal",
+};
+
+enum FfiChatType {
+    "Dialog",
+    "Chat",
+    "Channel",
+};
+
+dictionary FfiClientConfig {
+    string phone;
+    string work_dir;
+    string? token;
+    string? device_type;
+};
+
+dictionary FfiMe {
+    i64 id;
+    string phone;
+    string display_name;
+};
+
+dictionary FfiChatItem {
+    i64 id;
+    FfiChatType chat_type;
+    string title;
+    string last_message_text;
+    i64 last_message_time;
+    string? avatar_url;
+};
+
+dictionary FfiMessage {
+    i64 id;
+    i64 chat_id;
+    i64 time;
+    string text;
+    i64 sender_id;
+    string sender_name;
+    boolean is_outgoing;
+    string? status;
+};
+
+dictionary FfiQrLoginData {
+    string qr_link;
+    string track_id;
+    u64 polling_interval_ms;
+    i64 expires_at_ms;
+};
+
+[Enum]
+interface FfiCodeResult {
+    LoggedIn(string token);
+    TwoFactorRequired(string track_id, string? hint);
+};
+
+dictionary FfiUser {
+    i64 id;
+    string display_name;
+    string? avatar_url;
+};
+
+dictionary FfiReactionInfo {
+    i32 total_count;
+    string? your_reaction;
+};
+
+callback interface EventListener {
+    void on_new_message(FfiMessage message);
+    void on_message_edited(FfiMessage message);
+    void on_message_deleted(FfiMessage message);
+    void on_chat_updated(FfiChatItem chat);
+    void on_typing(i64 chat_id, i64 user_id);
+};
+
+interface ZeroMaxClient {
+    [Throws=FfiError, Name="new_client"]
+    constructor(FfiClientConfig config);
+
+    [Throws=FfiError]
+    void connect();
+
+    [Throws=FfiError]
+    void connect_for_auth();
+
+    boolean is_connected();
+    void start_background_reconnect();
+
+    [Throws=FfiError]
+    void sync_after_login();
+
+    [Throws=FfiError]
+    void resolve_dialog_users();
+
+    // Auth
+    [Throws=FfiError]
+    string request_code(string phone, string language);
+
+    [Throws=FfiError]
+    FfiCodeResult verify_code(string code, string temp_token);
+
+    [Throws=FfiError]
+    void login_with_code(string temp_token, string code);
+
+    [Throws=FfiError]
+    void set_token(string token);
+
+    [Throws=FfiError]
+    string? check_2fa_password(string track_id, string password);
+
+    [Throws=FfiError]
+    FfiQrLoginData request_qr();
+
+    [Throws=FfiError]
+    boolean poll_qr_status(string track_id);
+
+    [Throws=FfiError]
+    string complete_qr_login(string track_id);
+
+    // Data
+    FfiMe? get_me();
+    sequence<FfiChatItem> get_chat_list();
+
+    [Throws=FfiError]
+    void load_all_chats();
+
+    [Throws=FfiError]
+    FfiUser get_user(i64 user_id);
+
+    // Messages
+    [Throws=FfiError]
+    sequence<FfiMessage> fetch_history(i64 chat_id, i64? from_time, i32 count);
+
+    [Throws=FfiError]
+    FfiMessage send_message(i64 chat_id, string text, i64? reply_to);
+
+    [Throws=FfiError]
+    void read_message(i64 chat_id, i64 message_id);
+
+    [Throws=FfiError]
+    void send_typing(i64 chat_id);
+
+    // Edit / Delete
+    [Throws=FfiError]
+    FfiMessage edit_message(i64 chat_id, i64 message_id, string text);
+
+    [Throws=FfiError]
+    void delete_message(i64 chat_id, sequence<i64> message_ids, boolean for_me);
+
+    // Reactions
+    [Throws=FfiError]
+    FfiReactionInfo? add_reaction(i64 chat_id, string message_id, string reaction);
+
+    [Throws=FfiError]
+    FfiReactionInfo? remove_reaction(i64 chat_id, string message_id);
+
+    // Chat management
+    [Throws=FfiError]
+    void join_chat(string link);
+
+    [Throws=FfiError]
+    void leave_chat(i64 chat_id);
+
+    // Profile
+    [Throws=FfiError]
+    void change_profile(string first_name, string? last_name, string? description);
+
+    [Throws=FfiError]
+    void server_logout();
+
+    // Events
+    void set_event_listener(EventListener listener);
+    void start_event_loop();
+};

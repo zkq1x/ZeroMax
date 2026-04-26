@@ -1,0 +1,23 @@
+[package]
+name = "zeromax-desktop"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "ZeroMax desktop client (macOS, Linux, Windows) built on Slint"
+rust-version = "1.75"
+
+[[bin]]
+name = "ZeroMax"
+path = "src/main.rs"
+
+[dependencies]
+zeromax-core = { path = "../../zeromax-core" }
+slint = { version = "1.16", default-features = false, features = ["std", "compat-1-2", "backend-winit", "renderer-skia", "accessibility"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+directories = "5"
+anyhow = "1"
+
+[build-dependencies]
+slint-build = "1.16"

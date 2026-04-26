@@ -1,0 +1,23 @@
+[package]
+name = "zeromax-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "UniFFI bridge from zeromax-core to Swift/Kotlin"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+name = "zeromax_ffi"
+
+[dependencies]
+zeromax-core = { path = "../zeromax-core" }
+uniffi = { version = "0.28", features = ["cli"] }
+tokio = { version = "1", features = ["full"] }
+serde_json = "1"
+tracing = "0.1"
+
+[build-dependencies]
+uniffi = { version = "0.28", features = ["build"] }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"

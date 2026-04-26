@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "zeromax-core",
+    "zeromax-ffi",
+    "apps/desktop",
+]
+resolver = "2"
