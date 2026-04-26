@@ -1,4 +1,258 @@
-import { Button, VerticalBox } from "std-widgets.slint";
+import { Button, LineEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export enum Screen {
+    bootstrap,
+    login-choose,
+    login-phone,
+    login-code,
+    login-2fa,
+    login-qr,
+    authed,
+}
+
+component Title inherits Text {
+    font-size: 22px;
+    font-weight: 600;
+    horizontal-alignment: center;
+}
+
+component Subtitle inherits Text {
+    font-size: 13px;
+    color: #999;
+    horizontal-alignment: center;
+    wrap: word-wrap;
+}
+
+component ErrorBanner inherits Text {
+    color: #e06060;
+    font-size: 12px;
+    horizontal-alignment: center;
+    wrap: word-wrap;
+}
+
+component BootstrapView inherits Rectangle {
+    VerticalBox {
+        alignment: center;
+        spacing: 12px;
+        Title { text: "ZeroMax"; }
+        Subtitle { text: "Restoring session…"; }
+    }
+}
+
+component ChooseLoginView inherits Rectangle {
+    callback choose-phone();
+    callback choose-qr();
+
+    VerticalBox {
+        alignment: center;
+        spacing: 16px;
+        padding: 32px;
+
+        Title { text: "Welcome to ZeroMax"; }
+        Subtitle { text: "Choose how to sign in"; }
+
+        Rectangle { height: 16px; }
+
+        HorizontalBox {
+            alignment: center;
+            spacing: 12px;
+            Button { text: "Phone + SMS"; clicked => { root.choose-phone(); } }
+            Button { text: "QR code"; clicked => { root.choose-qr(); } }
+        }
+    }
+}
+
+component PhoneView inherits Rectangle {
+    in property <bool> busy;
+    in property <string> error-message;
+    callback submit(string);
+    callback back();
+
+    VerticalBox {
+        alignment: center;
+        spacing: 12px;
+        padding: 32px;
+
+        Title { text: "Enter phone number"; }
+        Subtitle { text: "We'll send a code via SMS"; }
+
+        Rectangle { height: 8px; }
+
+        HorizontalBox {
+            alignment: center;
+            phone-input := LineEdit {
+                width: 280px;
+                placeholder-text: "+7…";
+                enabled: !root.busy;
+                accepted(text) => { root.submit(text); }
+            }
+        }
+
+        if root.error-message != "": ErrorBanner { text: root.error-message; }
+
+        HorizontalBox {
+            alignment: center;
+            spacing: 8px;
+            Button { text: "Back"; enabled: !root.busy; clicked => { root.back(); } }
+            Button {
+                text: root.busy ? "Sending…" : "Send code";
+                primary: true;
+                enabled: !root.busy;
+                clicked => { root.submit(phone-input.text); }
+            }
+        }
+    }
+}
+
+component CodeView inherits Rectangle {
+    in property <bool> busy;
+    in property <string> phone;
+    in property <string> error-message;
+    callback submit(string);
+    callback back();
+
+    VerticalBox {
+        alignment: center;
+        spacing: 12px;
+        padding: 32px;
+
+        Title { text: "Enter code"; }
+        Subtitle { text: "Sent to " + root.phone; }
+
+        Rectangle { height: 8px; }
+
+        HorizontalBox {
+            alignment: center;
+            code-input := LineEdit {
+                width: 200px;
+                placeholder-text: "123456";
+                input-type: number;
+                enabled: !root.busy;
+                accepted(text) => { root.submit(text); }
+            }
+        }
+
+        if root.error-message != "": ErrorBanner { text: root.error-message; }
+
+        HorizontalBox {
+            alignment: center;
+            spacing: 8px;
+            Button { text: "Back"; enabled: !root.busy; clicked => { root.back(); } }
+            Button {
+                text: root.busy ? "Verifying…" : "Verify";
+                primary: true;
+                enabled: !root.busy;
+                clicked => { root.submit(code-input.text); }
+            }
+        }
+    }
+}
+
+component TwoFaView inherits Rectangle {
+    in property <bool> busy;
+    in property <string> hint;
+    in property <string> error-message;
+    callback submit(string);
+    callback back();
+
+    VerticalBox {
+        alignment: center;
+        spacing: 12px;
+        padding: 32px;
+
+        Title { text: "Two-factor password"; }
+        Subtitle { text: root.hint != "" ? "Hint: " + root.hint : "Enter your 2FA password"; }
+
+        Rectangle { height: 8px; }
+
+        HorizontalBox {
+            alignment: center;
+            pwd-input := LineEdit {
+                width: 280px;
+                placeholder-text: "Password";
+                input-type: password;
+                enabled: !root.busy;
+                accepted(text) => { root.submit(text); }
+            }
+        }
+
+        if root.error-message != "": ErrorBanner { text: root.error-message; }
+
+        HorizontalBox {
+            alignment: center;
+            spacing: 8px;
+            Button { text: "Back"; enabled: !root.busy; clicked => { root.back(); } }
+            Button {
+                text: root.busy ? "Checking…" : "Sign in";
+                primary: true;
+                enabled: !root.busy;
+                clicked => { root.submit(pwd-input.text); }
+            }
+        }
+    }
+}
+
+component QrView inherits Rectangle {
+    in property <image> qr;
+    in property <string> status;
+    in property <string> error-message;
+    in property <bool> busy;
+    callback back();
+
+    VerticalBox {
+        alignment: center;
+        spacing: 12px;
+        padding: 32px;
+
+        Title { text: "Scan with MAX mobile"; }
+        Subtitle { text: "Open MAX → Settings → Devices → Link device"; }
+
+        Rectangle { height: 8px; }
+
+        HorizontalBox {
+            alignment: center;
+            Rectangle {
+                width: 256px;
+                height: 256px;
+                background: white;
+                border-radius: 8px;
+                Image {
+                    source: root.qr;
+                    width: 240px;
+                    height: 240px;
+                }
+            }
+        }
+
+        Subtitle { text: root.status; }
+
+        if root.error-message != "": ErrorBanner { text: root.error-message; }
+
+        HorizontalBox {
+            alignment: center;
+            Button { text: "Back"; enabled: !root.busy; clicked => { root.back(); } }
+        }
+    }
+}
+
+component AuthedView inherits Rectangle {
+    in property <string> account-name;
+    callback logout();
+
+    VerticalBox {
+        alignment: center;
+        spacing: 16px;
+
+        Title { text: "Signed in"; }
+        Subtitle { text: root.account-name; }
+        Subtitle { text: "(Chat list coming in Phase 4)"; }
+
+        HorizontalBox {
+            alignment: center;
+            Button { text: "Sign out"; clicked => { root.logout(); } }
+        }
+    }
+}
 
 export component AppWindow inherits Window {
     title: "ZeroMax";
@@ -6,45 +260,67 @@ export component AppWindow inherits Window {
     min-height: 500px;
     preferred-width: 1000px;
     preferred-height: 700px;
+    background: #121212;
 
-    in-out property <string> status: "Ready";
+    in-out property <Screen> screen: Screen.bootstrap;
     in-out property <bool> busy: false;
-    callback connect-clicked();
+    in-out property <string> error-message: "";
+    in-out property <string> phone: "";
+    in-out property <string> two-fa-hint: "";
+    in-out property <string> qr-status: "Waiting for scan…";
+    in-out property <image> qr-image;
+    in-out property <string> account-name: "";
 
-    VerticalBox {
-        alignment: center;
-        spacing: 16px;
+    callback choose-phone();
+    callback choose-qr();
+    callback submit-phone(string);
+    callback submit-code(string);
+    callback submit-2fa(string);
+    callback back-to-choose();
+    callback logout();
 
-        Text {
-            text: "ZeroMax";
-            font-size: 32px;
-            font-weight: 600;
-            horizontal-alignment: center;
-        }
-
-        Text {
-            text: "Privacy-focused MAX client";
-            font-size: 14px;
-            color: #888;
-            horizontal-alignment: center;
-        }
-
-        Rectangle { height: 24px; }
-
-        Text {
-            text: root.status;
-            font-size: 13px;
-            horizontal-alignment: center;
-            wrap: word-wrap;
-        }
-
-        HorizontalLayout {
-            alignment: center;
-            Button {
-                text: root.busy ? "Connecting…" : "Test connect to MAX";
-                enabled: !root.busy;
-                clicked => { root.connect-clicked(); }
-            }
-        }
+    if root.screen == Screen.bootstrap: BootstrapView {
+        width: 100%; height: 100%;
+    }
+    if root.screen == Screen.login-choose: ChooseLoginView {
+        width: 100%; height: 100%;
+        choose-phone => { root.choose-phone(); }
+        choose-qr => { root.choose-qr(); }
+    }
+    if root.screen == Screen.login-phone: PhoneView {
+        width: 100%; height: 100%;
+        busy: root.busy;
+        error-message: root.error-message;
+        submit(p) => { root.submit-phone(p); }
+        back => { root.back-to-choose(); }
+    }
+    if root.screen == Screen.login-code: CodeView {
+        width: 100%; height: 100%;
+        busy: root.busy;
+        phone: root.phone;
+        error-message: root.error-message;
+        submit(c) => { root.submit-code(c); }
+        back => { root.back-to-choose(); }
+    }
+    if root.screen == Screen.login-2fa: TwoFaView {
+        width: 100%; height: 100%;
+        busy: root.busy;
+        hint: root.two-fa-hint;
+        error-message: root.error-message;
+        submit(p) => { root.submit-2fa(p); }
+        back => { root.back-to-choose(); }
+    }
+    if root.screen == Screen.login-qr: QrView {
+        width: 100%; height: 100%;
+        qr: root.qr-image;
+        status: root.qr-status;
+        error-message: root.error-message;
+        busy: root.busy;
+        back => { root.back-to-choose(); }
+    }
+    if root.screen == Screen.authed: AuthedView {
+        width: 100%; height: 100%;
+        account-name: root.account-name;
+        logout => { root.logout(); }
     }
 }

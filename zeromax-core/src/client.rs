@@ -277,6 +277,11 @@ impl MaxClient {
         self.connected && self.transport.is_connected()
     }
 
+    /// Whether a session token has been loaded (from config or storage).
+    pub fn has_token(&self) -> bool {
+        self.token.is_some()
+    }
+
     /// Subscribe to incoming server events (notifications).
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<crate::transport::Frame> {
         self.transport.subscribe()

@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 use tokio::runtime::Handle;
-use zeromax_core::{ClientConfig, MaxClient};
 
 /// Owns the tokio multi-thread runtime that all `zeromax-core` async work runs on.
 ///
@@ -30,32 +29,13 @@ impl Runtime {
 
 /// OS-appropriate user-data directory for ZeroMax (session DB, logs, cache).
 ///
-/// macOS: `~/Library/Application Support/ZeroMax/`
+/// macOS: `~/Library/Application Support/ru.ZeroMax.ZeroMax/`
 /// Linux: `~/.local/share/ZeroMax/`
-/// Windows: `%APPDATA%\ZeroMax\data\`
+/// Windows: `%APPDATA%\ZeroMax\ZeroMax\data\`
 pub fn data_dir() -> anyhow::Result<PathBuf> {
     let dirs = directories::ProjectDirs::from("ru", "ZeroMax", "ZeroMax")
         .context("Cannot resolve project directories")?;
     let dir = dirs.data_dir().to_path_buf();
     std::fs::create_dir_all(&dir).context("Failed to create data dir")?;
     Ok(dir)
-}
-
-/// Smoke test: open WebSocket to MAX, perform handshake, disconnect.
-///
-/// Uses a placeholder phone — only the handshake is exercised, not auth.
-/// Proves: tokio runtime ↔ zeromax-core ↔ network ↔ result-back-to-UI works.
-pub async fn test_connect() -> anyhow::Result<String> {
-    let work_dir = data_dir()?;
-    let config = ClientConfig::new("+79991234567")
-        .device_type("WEB")
-        .work_dir(work_dir);
-
-    let mut client = MaxClient::new(config)
-        .await
-        .context("MaxClient::new failed")?;
-    client.connect().await.context("connect failed")?;
-    let _ = client.close().await;
-
-    Ok("Handshake OK — WS reachable, no auth performed.".to_string())
 }
