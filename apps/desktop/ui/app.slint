@@ -1,4 +1,4 @@
-import { Button, LineEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Button, LineEdit, VerticalBox, HorizontalBox, ListView, ScrollView } from "std-widgets.slint";
 
 export enum Screen {
     bootstrap,
@@ -8,6 +8,15 @@ export enum Screen {
     login-2fa,
     login-qr,
     authed,
+}
+
+export struct ChatRowData {
+    id-text: string,    // i64 as string (Slint structs have no i64)
+    title: string,
+    preview: string,
+    time: string,
+    initial: string,
+    avatar-bg: color,
 }
 
 component Title inherits Text {
@@ -235,21 +244,172 @@ component QrView inherits Rectangle {
     }
 }
 
-component AuthedView inherits Rectangle {
+component AvatarCircle inherits Rectangle {
+    in property <string> initial;
+    in property <color> bg;
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+    background: bg;
+
+    Text {
+        text: root.initial;
+        color: white;
+        font-size: 16px;
+        font-weight: 600;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+component ChatRow inherits Rectangle {
+    in property <string> title;
+    in property <string> preview;
+    in property <string> time;
+    in property <string> initial;
+    in property <color> avatar-bg;
+    in property <bool> selected;
+    callback clicked();
+
+    height: 64px;
+    background: root.selected ? #2a2a2a : (ta.has-hover ? #232323 : transparent);
+
+    ta := TouchArea {
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        padding-top: 10px;
+        padding-bottom: 10px;
+        spacing: 12px;
+
+        AvatarCircle {
+            initial: root.initial;
+            bg: root.avatar-bg;
+        }
+
+        VerticalLayout {
+            spacing: 2px;
+            HorizontalLayout {
+                Text {
+                    text: root.title;
+                    font-size: 14px;
+                    font-weight: 500;
+                    color: white;
+                    overflow: elide;
+                    horizontal-stretch: 1;
+                }
+                Text {
+                    text: root.time;
+                    font-size: 11px;
+                    color: #888;
+                    horizontal-alignment: right;
+                }
+            }
+            Text {
+                text: root.preview;
+                font-size: 12px;
+                color: #999;
+                overflow: elide;
+            }
+        }
+    }
+}
+
+component ChatListPane inherits Rectangle {
+    in property <[ChatRowData]> chats;
+    in property <int> selected-idx: -1;
     in property <string> account-name;
+    callback chat-selected(int);
     callback logout();
 
+    background: #1a1a1a;
+
+    VerticalLayout {
+        Rectangle {
+            height: 56px;
+            background: #1e1e1e;
+
+            HorizontalLayout {
+                padding-left: 12px;
+                padding-right: 12px;
+                padding-top: 8px;
+                padding-bottom: 8px;
+                spacing: 8px;
+
+                VerticalLayout {
+                    horizontal-stretch: 1;
+                    Text {
+                        text: "Chats";
+                        font-size: 16px;
+                        font-weight: 600;
+                        color: white;
+                    }
+                    Text {
+                        text: root.account-name;
+                        font-size: 11px;
+                        color: #888;
+                        overflow: elide;
+                    }
+                }
+                Button {
+                    text: "Sign out";
+                    clicked => { root.logout(); }
+                }
+            }
+
+            // Border at the bottom of the header
+            Rectangle {
+                y: parent.height - 1px;
+                height: 1px;
+                background: #2c2c2c;
+            }
+        }
+
+        ListView {
+            for item[idx] in root.chats: ChatRow {
+                title: item.title;
+                preview: item.preview;
+                time: item.time;
+                initial: item.initial;
+                avatar-bg: item.avatar-bg;
+                selected: idx == root.selected-idx;
+                clicked => { root.chat-selected(idx); }
+            }
+        }
+    }
+}
+
+component ConversationPlaceholder inherits Rectangle {
+    background: #161616;
     VerticalBox {
         alignment: center;
-        spacing: 16px;
+        spacing: 8px;
+        Title { text: "Select a chat"; }
+        Subtitle { text: "Conversation view comes in Phase 5"; }
+    }
+}
 
-        Title { text: "Signed in"; }
-        Subtitle { text: root.account-name; }
-        Subtitle { text: "(Chat list coming in Phase 4)"; }
+component MainView inherits Rectangle {
+    in property <[ChatRowData]> chats;
+    in property <int> selected-idx: -1;
+    in property <string> account-name;
+    callback chat-selected(int);
+    callback logout();
 
-        HorizontalBox {
-            alignment: center;
-            Button { text: "Sign out"; clicked => { root.logout(); } }
+    HorizontalLayout {
+        ChatListPane {
+            width: 320px;
+            chats: root.chats;
+            selected-idx: root.selected-idx;
+            account-name: root.account-name;
+            chat-selected(idx) => { root.chat-selected(idx); }
+            logout => { root.logout(); }
+        }
+        ConversationPlaceholder {
+            horizontal-stretch: 1;
         }
     }
 }
@@ -270,6 +430,8 @@ export component AppWindow inherits Window {
     in-out property <string> qr-status: "Waiting for scan…";
     in-out property <image> qr-image;
     in-out property <string> account-name: "";
+    in-out property <[ChatRowData]> chats: [];
+    in-out property <int> selected-chat-idx: -1;
 
     callback choose-phone();
     callback choose-qr();
@@ -278,6 +440,7 @@ export component AppWindow inherits Window {
     callback submit-2fa(string);
     callback back-to-choose();
     callback logout();
+    callback chat-selected(int);
 
     if root.screen == Screen.bootstrap: BootstrapView {
         width: 100%; height: 100%;
@@ -318,9 +481,12 @@ export component AppWindow inherits Window {
         busy: root.busy;
         back => { root.back-to-choose(); }
     }
-    if root.screen == Screen.authed: AuthedView {
+    if root.screen == Screen.authed: MainView {
         width: 100%; height: 100%;
+        chats: root.chats;
+        selected-idx: root.selected-chat-idx;
         account-name: root.account-name;
+        chat-selected(idx) => { root.chat-selected(idx); }
         logout => { root.logout(); }
     }
 }

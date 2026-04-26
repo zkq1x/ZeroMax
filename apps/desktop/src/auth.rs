@@ -13,6 +13,10 @@ use zeromax_core::{ClientConfig, CodeResult, MaxClient, QrLoginData};
 const PLACEHOLDER_PHONE: &str = "+79991234567";
 const SMS_LANG: &str = "ru";
 
+/// Shared handle to the connected client. Held by both the auth controller and
+/// post-login view models (chat list, conversation, …).
+pub type ClientHandle = Arc<Mutex<Option<MaxClient>>>;
+
 /// Outcome of a resume attempt at app startup.
 pub enum ResumeOutcome {
     Authed { display_name: String },
@@ -26,18 +30,20 @@ pub enum CodeOutcome {
     TwoFactorRequired { track_id: String, hint: Option<String> },
 }
 
-/// Owns the `MaxClient` across the login → authed lifecycle.
+/// Owns the `MaxClient` across the login → authed lifecycle, plus auth-flow
+/// scratch state (temp tokens, QR polling task).
 ///
 /// SMS flow uses DESKTOP transport (raw socket), QR uses WEB transport (WebSocket).
-/// After login completes, the same client stays for follow-up operations.
+/// The same client stays around for follow-up operations (chat list, etc.) and
+/// is reachable by other modules through `client_handle()`.
 pub struct AuthController {
     work_dir: PathBuf,
-    inner: Arc<Mutex<State>>,
+    client: ClientHandle,
+    flow: Arc<Mutex<FlowState>>,
 }
 
 #[derive(Default)]
-struct State {
-    client: Option<MaxClient>,
+struct FlowState {
     temp_token: Option<String>,
     two_fa_track_id: Option<String>,
     qr_track_id: Option<String>,
@@ -48,13 +54,17 @@ impl AuthController {
     pub fn new(work_dir: PathBuf) -> Self {
         Self {
             work_dir,
-            inner: Arc::new(Mutex::new(State::default())),
+            client: Arc::new(Mutex::new(None)),
+            flow: Arc::new(Mutex::new(FlowState::default())),
         }
     }
 
-    /// Try to resume from disk-stored token.
-    ///
-    /// Skips network entirely if no token is on disk — first-launch is instant.
+    /// Get a clone of the shared client handle for use by other view models.
+    pub fn client_handle(&self) -> ClientHandle {
+        self.client.clone()
+    }
+
+    /// Try to resume from disk-stored token. Skips network if no token on disk.
     pub async fn try_resume(&self) -> Result<ResumeOutcome> {
         let config = ClientConfig::new(PLACEHOLDER_PHONE)
             .device_type("WEB")
@@ -71,7 +81,7 @@ impl AuthController {
         match client.connect().await {
             Ok(()) if client.me.is_some() => {
                 let name = display_name(&client);
-                self.inner.lock().await.client = Some(client);
+                *self.client.lock().await = Some(client);
                 Ok(ResumeOutcome::Authed { display_name: name })
             }
             Ok(()) => Ok(ResumeOutcome::NeedLogin),
@@ -92,24 +102,25 @@ impl AuthController {
             .work_dir(self.work_dir.clone());
         let mut client = MaxClient::new(config).await?;
 
-        // No token yet ⇒ connect() does handshake-only (skips sync).
         client.connect().await.context("Handshake failed")?;
         let temp_token = client.request_code(phone, SMS_LANG).await?;
 
-        let mut state = self.inner.lock().await;
-        state.client = Some(client);
-        state.temp_token = Some(temp_token);
+        *self.client.lock().await = Some(client);
+        self.flow.lock().await.temp_token = Some(temp_token);
         Ok(())
     }
 
     pub async fn submit_code(&self, code: &str) -> Result<CodeOutcome> {
-        let mut state = self.inner.lock().await;
-        let temp_token = state
+        let temp_token = self
+            .flow
+            .lock()
+            .await
             .temp_token
             .clone()
             .ok_or_else(|| anyhow!("No temp_token"))?;
-        let client = state
-            .client
+
+        let mut client_guard = self.client.lock().await;
+        let client = client_guard
             .as_mut()
             .ok_or_else(|| anyhow!("No active client"))?;
 
@@ -122,20 +133,20 @@ impl AuthController {
                 })
             }
             CodeResult::TwoFactorRequired { track_id, hint } => {
-                state.two_fa_track_id = Some(track_id.clone());
+                drop(client_guard);
+                self.flow.lock().await.two_fa_track_id = Some(track_id.clone());
                 Ok(CodeOutcome::TwoFactorRequired { track_id, hint })
             }
         }
     }
 
     pub async fn current_2fa_track_id(&self) -> Option<String> {
-        self.inner.lock().await.two_fa_track_id.clone()
+        self.flow.lock().await.two_fa_track_id.clone()
     }
 
     pub async fn submit_2fa(&self, track_id: &str, password: &str) -> Result<String> {
-        let mut state = self.inner.lock().await;
-        let client = state
-            .client
+        let mut client_guard = self.client.lock().await;
+        let client = client_guard
             .as_mut()
             .ok_or_else(|| anyhow!("No active client"))?;
 
@@ -161,25 +172,22 @@ impl AuthController {
         client.connect().await.context("Handshake failed")?;
         let qr = client.request_qr().await?;
 
-        let mut state = self.inner.lock().await;
-        state.client = Some(client);
-        state.qr_track_id = Some(qr.track_id.clone());
+        *self.client.lock().await = Some(client);
+        self.flow.lock().await.qr_track_id = Some(qr.track_id.clone());
         Ok(qr)
     }
 
     pub async fn poll_qr_once(&self, track_id: &str) -> Result<bool> {
-        let mut state = self.inner.lock().await;
-        let client = state
-            .client
+        let mut client_guard = self.client.lock().await;
+        let client = client_guard
             .as_mut()
             .ok_or_else(|| anyhow!("No active client for QR poll"))?;
         Ok(client.poll_qr_status(track_id).await?)
     }
 
     pub async fn complete_qr(&self, track_id: &str) -> Result<String> {
-        let mut state = self.inner.lock().await;
-        let client = state
-            .client
+        let mut client_guard = self.client.lock().await;
+        let client = client_guard
             .as_mut()
             .ok_or_else(|| anyhow!("No active client"))?;
 
@@ -190,38 +198,37 @@ impl AuthController {
     }
 
     pub async fn set_qr_task(&self, handle: JoinHandle<()>) {
-        let mut state = self.inner.lock().await;
-        if let Some(prev) = state.qr_task.replace(handle) {
+        if let Some(prev) = self.flow.lock().await.qr_task.replace(handle) {
             prev.abort();
         }
     }
 
     /// Drop client + abort any running QR task. Used on Back / before starting a new flow.
     pub async fn cancel_flow(&self) {
-        let mut state = self.inner.lock().await;
-        if let Some(task) = state.qr_task.take() {
+        if let Some(task) = self.flow.lock().await.qr_task.take() {
             task.abort();
         }
-        if let Some(mut client) = state.client.take() {
+        if let Some(mut client) = self.client.lock().await.take() {
             let _ = client.close().await;
         }
-        state.temp_token = None;
-        state.two_fa_track_id = None;
-        state.qr_track_id = None;
+        let mut flow = self.flow.lock().await;
+        flow.temp_token = None;
+        flow.two_fa_track_id = None;
+        flow.qr_track_id = None;
     }
 
     pub async fn logout(&self) -> Result<()> {
-        let mut state = self.inner.lock().await;
-        if let Some(task) = state.qr_task.take() {
+        if let Some(task) = self.flow.lock().await.qr_task.take() {
             task.abort();
         }
-        if let Some(mut client) = state.client.take() {
+        if let Some(mut client) = self.client.lock().await.take() {
             let _ = client.close().await;
         }
-        state.temp_token = None;
-        state.two_fa_track_id = None;
-        state.qr_track_id = None;
-        drop(state);
+        let mut flow = self.flow.lock().await;
+        flow.temp_token = None;
+        flow.two_fa_track_id = None;
+        flow.qr_track_id = None;
+        drop(flow);
 
         self.wipe_session();
         Ok(())

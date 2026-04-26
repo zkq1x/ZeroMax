@@ -19,6 +19,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 directories = "5"
 anyhow = "1"
 qrcode = { version = "0.14", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 [build-dependencies]
 slint-build = "1.16"

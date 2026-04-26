@@ -1,20 +1,32 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod auth;
+mod chat_list;
 mod qr;
 mod runtime;
 
-use std::sync::Arc;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
-use slint::ComponentHandle;
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 use tokio::runtime::Handle;
 use tracing_subscriber::EnvFilter;
 use zeromax_core::QrLoginData;
 
 use auth::{AuthController, CodeOutcome, ResumeOutcome};
+use chat_list::{ChatListViewModel, ChatRow};
 
 slint::include_modules!();
+
+/// Bag of dependencies passed to callback wiring. Keeps signatures short.
+#[derive(Clone)]
+struct Wiring {
+    rt: Handle,
+    auth: Arc<AuthController>,
+    chats: Arc<ChatListViewModel>,
+    rows: Arc<StdMutex<Vec<ChatRow>>>,
+}
 
 fn main() -> anyhow::Result<()> {
     init_tracing()?;
@@ -22,16 +34,25 @@ fn main() -> anyhow::Result<()> {
 
     let rt = runtime::Runtime::new()?;
     let auth = Arc::new(AuthController::new(runtime::data_dir()?));
-    let app = AppWindow::new()?;
+    let chats = Arc::new(ChatListViewModel::new(auth.client_handle()));
+    let rows: Arc<StdMutex<Vec<ChatRow>>> = Arc::new(StdMutex::new(Vec::new()));
 
-    wire_callbacks(&app, rt.handle(), auth.clone());
-    spawn_resume(&app, rt.handle(), auth);
+    let app = AppWindow::new()?;
+    let wiring = Wiring {
+        rt: rt.handle(),
+        auth: auth.clone(),
+        chats: chats.clone(),
+        rows: rows.clone(),
+    };
+
+    wire_callbacks(&app, &wiring);
+    spawn_resume(&app, &wiring);
 
     app.run()?;
     Ok(())
 }
 
-fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
+fn wire_callbacks(app: &AppWindow, w: &Wiring) {
     {
         let weak = app.as_weak();
         app.on_choose_phone(move || {
@@ -43,16 +64,14 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
     }
     {
         let weak = app.as_weak();
-        let auth = auth.clone();
-        let rt2 = rt.clone();
+        let w_for = w.clone();
         app.on_choose_qr(move || {
             ui_busy(&weak, true);
             ui_error(&weak, "");
             let weak = weak.clone();
-            let auth = auth.clone();
-            let rt2 = rt2.clone();
-            rt2.clone().spawn(async move {
-                match auth.start_qr().await {
+            let w_for = w_for.clone();
+            w_for.rt.clone().spawn(async move {
+                match w_for.auth.start_qr().await {
                     Ok(data) => match qr::render_buffer(&data.qr_link, 8) {
                         Ok(buf) => {
                             let weak_for_ui = weak.clone();
@@ -63,7 +82,7 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
                                 ui.set_busy(false);
                                 ui.set_screen(Screen::LoginQr);
                             });
-                            start_qr_polling(weak, rt2, auth, data);
+                            start_qr_polling(weak, w_for, data);
                         }
                         Err(e) => show_error(&weak, format!("QR render failed: {e:#}")),
                     },
@@ -74,16 +93,15 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
     }
     {
         let weak = app.as_weak();
-        let auth = auth.clone();
-        let rt = rt.clone();
+        let w_for = w.clone();
         app.on_submit_phone(move |phone| {
             let phone = phone.to_string();
             ui_busy(&weak, true);
             ui_error(&weak, "");
             let weak = weak.clone();
-            let auth = auth.clone();
-            rt.spawn(async move {
-                match auth.start_sms(&phone).await {
+            let w_for = w_for.clone();
+            w_for.rt.clone().spawn(async move {
+                match w_for.auth.start_sms(&phone).await {
                     Ok(()) => {
                         let _ = weak.upgrade_in_event_loop(move |ui| {
                             ui.set_phone(phone.into());
@@ -99,18 +117,17 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
     }
     {
         let weak = app.as_weak();
-        let auth = auth.clone();
-        let rt = rt.clone();
+        let w_for = w.clone();
         app.on_submit_code(move |code| {
             let code = code.to_string();
             ui_busy(&weak, true);
             ui_error(&weak, "");
             let weak = weak.clone();
-            let auth = auth.clone();
-            rt.spawn(async move {
-                match auth.submit_code(&code).await {
+            let w_for = w_for.clone();
+            w_for.rt.clone().spawn(async move {
+                match w_for.auth.submit_code(&code).await {
                     Ok(CodeOutcome::Authed { display_name }) => {
-                        finish_login(&weak, display_name);
+                        finish_login(&weak, &w_for, display_name);
                     }
                     Ok(CodeOutcome::TwoFactorRequired { hint, .. }) => {
                         let hint_str = hint.unwrap_or_default();
@@ -128,30 +145,23 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
     }
     {
         let weak = app.as_weak();
-        let auth = auth.clone();
-        let rt = rt.clone();
+        let w_for = w.clone();
         app.on_submit_2fa(move |password| {
             let password = password.to_string();
             ui_busy(&weak, true);
             ui_error(&weak, "");
             let weak = weak.clone();
-            let auth = auth.clone();
-            rt.spawn(async move {
-                // verify_code earlier returned a TwoFactorRequired with track_id; we don't
-                // currently round-trip it through the UI. The controller has captured it
-                // internally — but our current API requires the caller to pass it.
-                // For MVP we re-stash it on the controller side; here we re-pull from
-                // last verify result via a follow-up: ask controller for the current
-                // track_id. Add accessor.
-                let track_id = match auth.current_2fa_track_id().await {
+            let w_for = w_for.clone();
+            w_for.rt.clone().spawn(async move {
+                let track_id = match w_for.auth.current_2fa_track_id().await {
                     Some(t) => t,
                     None => {
                         show_error(&weak, "Internal: no 2FA track id".into());
                         return;
                     }
                 };
-                match auth.submit_2fa(&track_id, &password).await {
-                    Ok(name) => finish_login(&weak, name),
+                match w_for.auth.submit_2fa(&track_id, &password).await {
+                    Ok(name) => finish_login(&weak, &w_for, name),
                     Err(e) => show_error(&weak, format!("2FA failed: {e:#}")),
                 }
             });
@@ -159,12 +169,11 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
     }
     {
         let weak = app.as_weak();
-        let auth = auth.clone();
-        let rt = rt.clone();
+        let w_for = w.clone();
         app.on_back_to_choose(move || {
             let weak = weak.clone();
-            let auth = auth.clone();
-            rt.spawn(async move {
+            let auth = w_for.auth.clone();
+            w_for.rt.spawn(async move {
                 auth.cancel_flow().await;
                 let _ = weak.upgrade_in_event_loop(|ui| {
                     ui.set_busy(false);
@@ -176,60 +185,73 @@ fn wire_callbacks(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
     }
     {
         let weak = app.as_weak();
-        let auth = auth.clone();
-        let rt = rt.clone();
+        let w_for = w.clone();
         app.on_logout(move || {
             let weak = weak.clone();
-            let auth = auth.clone();
-            rt.spawn(async move {
-                let _ = auth.logout().await;
+            let w_for = w_for.clone();
+            w_for.rt.clone().spawn(async move {
+                let _ = w_for.auth.logout().await;
+                w_for.rows.lock().unwrap().clear();
                 let _ = weak.upgrade_in_event_loop(|ui| {
                     ui.set_account_name("".into());
+                    let empty: Rc<VecModel<ChatRowData>> = Rc::new(VecModel::default());
+                    ui.set_chats(ModelRc::from(empty));
+                    ui.set_selected_chat_idx(-1);
                     ui.set_screen(Screen::LoginChoose);
                 });
             });
         });
     }
-}
-
-fn spawn_resume(app: &AppWindow, rt: Handle, auth: Arc<AuthController>) {
-    let weak = app.as_weak();
-    rt.spawn(async move {
-        let outcome = auth.try_resume().await;
-        let next = match outcome {
-            Ok(ResumeOutcome::Authed { display_name }) => Some(display_name),
-            Ok(ResumeOutcome::NeedLogin) => None,
-            Err(e) => {
-                tracing::warn!(error = %e, "try_resume errored");
-                None
-            }
-        };
-        let _ = weak.upgrade_in_event_loop(move |ui| {
-            match next {
-                Some(name) => {
-                    ui.set_account_name(name.into());
-                    ui.set_screen(Screen::Authed);
+    {
+        let weak = app.as_weak();
+        let rows = w.rows.clone();
+        app.on_chat_selected(move |idx| {
+            let idx = idx as usize;
+            let info = rows.lock().unwrap().get(idx).map(|r| (r.id, r.title.clone()));
+            if let Some((id, title)) = info {
+                tracing::info!(idx, id, title = %title, "Chat selected");
+                if let Some(ui) = weak.upgrade() {
+                    ui.set_selected_chat_idx(idx as i32);
                 }
-                None => ui.set_screen(Screen::LoginChoose),
             }
         });
+    }
+}
+
+fn spawn_resume(app: &AppWindow, w: &Wiring) {
+    let weak = app.as_weak();
+    let w_for = w.clone();
+    w.rt.spawn(async move {
+        let outcome = w_for.auth.try_resume().await;
+        match outcome {
+            Ok(ResumeOutcome::Authed { display_name }) => {
+                let weak2 = weak.clone();
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    ui.set_account_name(display_name.into());
+                    ui.set_screen(Screen::Authed);
+                });
+                spawn_load_chats(weak2, &w_for);
+            }
+            Ok(ResumeOutcome::NeedLogin) => {
+                let _ = weak.upgrade_in_event_loop(|ui| ui.set_screen(Screen::LoginChoose));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "try_resume errored");
+                let _ = weak.upgrade_in_event_loop(|ui| ui.set_screen(Screen::LoginChoose));
+            }
+        }
     });
 }
 
-fn start_qr_polling(
-    weak: slint::Weak<AppWindow>,
-    rt: Handle,
-    auth: Arc<AuthController>,
-    data: QrLoginData,
-) {
+fn start_qr_polling(weak: slint::Weak<AppWindow>, w: Wiring, data: QrLoginData) {
     let interval = Duration::from_millis((data.polling_interval_ms as u64).max(500));
     let until_expire_ms = (data.expires_at_ms - now_ms()).max(0) as u64;
     let deadline = Instant::now() + Duration::from_millis(until_expire_ms);
     let track_id = data.track_id.clone();
 
-    let auth_for_task = auth.clone();
+    let w_for_task = w.clone();
     let weak_for_task = weak.clone();
-    let handle = rt.spawn(async move {
+    let handle = w.rt.spawn(async move {
         loop {
             tokio::time::sleep(interval).await;
             if Instant::now() >= deadline {
@@ -238,19 +260,14 @@ fn start_qr_polling(
                 });
                 return;
             }
-            match auth_for_task.poll_qr_once(&track_id).await {
+            match w_for_task.auth.poll_qr_once(&track_id).await {
                 Ok(false) => continue,
                 Ok(true) => {
                     let _ = weak_for_task.upgrade_in_event_loop(|ui| {
                         ui.set_qr_status("Scanned — finishing login…".into());
                     });
-                    match auth_for_task.complete_qr(&track_id).await {
-                        Ok(name) => {
-                            let _ = weak_for_task.upgrade_in_event_loop(move |ui| {
-                                ui.set_account_name(name.into());
-                                ui.set_screen(Screen::Authed);
-                            });
-                        }
+                    match w_for_task.auth.complete_qr(&track_id).await {
+                        Ok(name) => finish_login(&weak_for_task, &w_for_task, name),
                         Err(e) => {
                             let _ = weak_for_task.upgrade_in_event_loop(move |ui| {
                                 ui.set_error_message(format!("Login failed: {e:#}").into());
@@ -270,19 +287,54 @@ fn start_qr_polling(
         }
     });
 
-    let auth_for_store = auth;
-    rt.spawn(async move {
+    let auth_for_store = w.auth.clone();
+    w.rt.spawn(async move {
         auth_for_store.set_qr_task(handle).await;
     });
 }
 
-fn finish_login(weak: &slint::Weak<AppWindow>, display_name: String) {
+fn finish_login(weak: &slint::Weak<AppWindow>, w: &Wiring, display_name: String) {
+    let weak2 = weak.clone();
     let _ = weak.upgrade_in_event_loop(move |ui| {
         ui.set_account_name(display_name.into());
         ui.set_busy(false);
         ui.set_error_message("".into());
         ui.set_screen(Screen::Authed);
     });
+    spawn_load_chats(weak2, w);
+}
+
+fn spawn_load_chats(weak: slint::Weak<AppWindow>, w: &Wiring) {
+    let chats_vm = w.chats.clone();
+    let rows_store = w.rows.clone();
+    w.rt.spawn(async move {
+        match chats_vm.load().await {
+            Ok(rows) => {
+                let model_data: Vec<ChatRowData> = rows.iter().map(to_slint_row).collect();
+                *rows_store.lock().unwrap() = rows;
+                let _ = weak.upgrade_in_event_loop(move |ui| {
+                    let model = Rc::new(VecModel::from(model_data));
+                    let len = model.row_count() as i32;
+                    ui.set_chats(ModelRc::from(model));
+                    ui.set_selected_chat_idx(-1);
+                    tracing::info!(count = len, "Chat list loaded");
+                });
+            }
+            Err(e) => tracing::warn!(error = %e, "Failed to load chat list"),
+        }
+    });
+}
+
+fn to_slint_row(r: &ChatRow) -> ChatRowData {
+    let (cr, cg, cb) = r.avatar_color;
+    ChatRowData {
+        id_text: r.id.to_string().into(),
+        title: r.title.clone().into(),
+        preview: r.preview.clone().into(),
+        time: r.time_label.clone().into(),
+        initial: r.initial.clone().into(),
+        avatar_bg: slint::Color::from_rgb_u8(cr, cg, cb),
+    }
 }
 
 fn show_error(weak: &slint::Weak<AppWindow>, msg: String) {
